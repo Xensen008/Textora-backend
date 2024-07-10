@@ -22,14 +22,13 @@ app.get("/", (req, res) => {
     res.send("hey fuckers")
 })
 
-connectDB().then(()=>{
+connectDB().then(() => {
     app.listen(PORT, () => {
-        console.log(`Server running at http://localhost:${PORT})`)
-    }
-    )
-}).catch(error,()=>{
-    console.log("error",error)
-})
+        console.log(`Server running at http://localhost:${PORT}`);
+    });
+}).catch((error) => {
+    console.log("error", error);
+});
 
 
 
