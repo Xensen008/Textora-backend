@@ -3,9 +3,11 @@ const app = express()
 const cors = require("cors")
 const connectDB = require("./config/connectDB")
 const router = require("./routers/auth.route")
-
+const cookiesParser = require("cookie-parser")
 require('dotenv').config()
 
+
+app.use(cookiesParser())
 app.use(cors({
     origin : process.env.FRONTEND_URL,
     Credential:true
