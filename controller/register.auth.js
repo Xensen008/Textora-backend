@@ -3,7 +3,7 @@ const bcryptjs = require("bcryptjs")
 
 async function registerUser(req,res){
     try {
-        const [name, email, password, profile_pic]= req.body
+        const {name, email, password, profile_pic}= req.body
         const checkEmail = await UserModel.findOne({email})
 
         if (checkEmail){

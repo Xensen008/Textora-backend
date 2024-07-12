@@ -1,9 +1,8 @@
 const express = require("express")
-const path= require("path")
 const app = express()
 const cors = require("cors")
 const connectDB = require("./config/connectDB")
-
+const router = require("./routers/auth.route")
 
 require('dotenv').config()
 
@@ -14,13 +13,16 @@ app.use(cors({
  
 const PORT = process.env.port || 8080
 
-app.use(express.static(path.join(__dirname, 'public')))
 app.use(express.json())
 
 
 app.get("/", (req, res) => {
     res.send("hey fuckers")
+
 })
+
+//api endpoints 
+app.use("/api",router)
 
 connectDB().then(() => {
     app.listen(PORT, () => {
