@@ -1,37 +1,41 @@
-const express = require("express")
-const app = express()
-const cors = require("cors")
-const connectDB = require("./config/connectDB")
-const router = require("./routers/auth.route")
-const cookiesParser = require("cookie-parser")
-require('dotenv').config()
+const express = require("express");
+const cors = require("cors");
+const connectDB = require("./config/connectDB");
+const router = require("./routers/auth.route");
+const cookiesParser = require("cookie-parser");
+const { app, server } = require("./socket.io/index"); // Ensure this correctly initializes express
+require('dotenv').config();
 
-
+// Middleware
 app.use(cors({
-    origin : process.env.FRONTEND_URL,
-    credentials:true
-}))
- 
-const PORT = process.env.PORT || 8080
+    origin: process.env.FRONTEND_URL,
+    credentials: true
+}));
 
-app.use(express.json())
-app.use(cookiesParser())
+app.use(express.json());
+app.use(cookiesParser());
 
-
+// Root route
 app.get("/", (req, res) => {
-    res.send("hey fuckers")
+    res.send("Welcome to our application!"); // More professional message
+});
 
-})
+// API endpoints
+app.use("/api", router);
 
-//api endpoints 
-app.use("/api",router)
+// Error handling middleware (basic example)
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).send('Something broke!');
+});
 
+// Database connection and server start
 connectDB().then(() => {
-    app.listen(PORT, () => {
-        console.log(`Server running at http://localhost:${PORT}`);
+    server.listen(process.env.PORT || 8080, () => {
+        console.log(`Server running at http://localhost:${process.env.PORT || 8080}`);
     });
 }).catch((error) => {
-    console.log("error", error);
+    console.error("Database connection failed", error);
 });
 
 
