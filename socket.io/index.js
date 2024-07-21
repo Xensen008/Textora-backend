@@ -2,7 +2,8 @@ const express = require('express');
 const { Server } = require('socket.io');
 const http = require('http');
 const app = express();
-const userDataToken = require('../utils/extractToken')  
+const userDataToken = require('../utils/extractToken');  
+const UserModel = require('../models/user.model');
 require('dotenv').config(); 
 
 const server = http.createServer(app);
@@ -27,9 +28,24 @@ io.on("connection", async (socket) => {
     
     //create a room
     socket.join(user?._id);
-    onlineUser.add(user?._id)
+    onlineUser.add(user?._id?.toString())
 
-    io.emit('onlineUser', Array.from(onlineUser))
+    io.emit('onlineUser', Array.from(onlineUser));
+    
+    socket.on('message-page',async(userId)=>{
+        // console.log('userId',userId)
+        const userDetails= await UserModel.findById(userId).select("-password")
+
+        const payload = {
+            _id :userDetails?._id,
+            name : userDetails?.name,
+            email: userDetails?.email,
+            profile_pic: userDetails?.profile_pic,
+            online: onlineUser.has(userId),
+        }
+        socket.emit('message-user',payload)
+        
+    })
 
     // Handle socket disconnection
     socket.on("disconnect", () => {
