@@ -49,7 +49,7 @@ io.on("connection", async (socket) => {
 
     // Handle socket disconnection
     socket.on("disconnect", () => {
-        onlineUser.delete(user?._id)
+        onlineUser.delete(user?._id?.toString()); 
         console.log("User disconnected:", socket.id);
     });
 });
