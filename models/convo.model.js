@@ -10,13 +10,18 @@ const messageSchema = new mongoose.Schema({
         type:String,
         default:""
     },
-    videoUrl :{
-        type: mongoose.Schema.ObjectId,
-        default : ""
-    },
+    videoUrl: {
+        type: String,
+        default: ""
+      },
     seen:{
-        type:Boolen,
+        type:Boolean,
         default:false
+    },
+    msgByUserId:{
+        type: mongoose.Schema.ObjectId,
+        required: true,
+        ref: "User"
     }
 },{
     timestamps: true
@@ -32,15 +37,15 @@ const convoSchema = new mongoose.Schema({
         required: true,
         ref: "User"
     },
-    message:{
-        type: mongose.Schema.ObjectId,
-        required: true,
-        ref: "User"
-    },
+    messages:[{
+        type: mongoose.Schema.ObjectId,
+        ref: "Message"
+    }],
 },{
     timestamps: true
-
 })
+
+
 const ConvoModel = mongoose.model("Conversation", convoSchema);
 const MessageModel = mongoose.model("Message", messageSchema);
 
