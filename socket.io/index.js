@@ -54,7 +54,7 @@ io.on("connection", async (socket) => {
             ]
         }).populate('messages').sort({ updatedAt: -1 });
 
-        socket.emit('message', getConversation.messages)
+        socket.emit('messages', getConversation.messages)
 
     })
 
@@ -63,8 +63,8 @@ io.on("connection", async (socket) => {
     socket.on("new message", async (data) => {
         let conversation = await ConvoModel.findOne({
             $or: [
-                { sender: data.sender, receiver: data.receiver },
-                { sender: data.receiver, receiver: data.sender },
+                { sender: data?.sender, receiver: data?.receiver },
+                { sender: data?.receiver, receiver: data?.sender },
             ]
         });
 
@@ -95,8 +95,8 @@ io.on("connection", async (socket) => {
 
         const getConversation = await ConvoModel.findOne({
             $or: [
-                { sender: data.sender, receiver: data.receiver },
-                { sender: data.receiver, receiver: data.sender },
+                { sender: data?.sender, receiver: data?.receiver },
+                { sender: data?.receiver, receiver: data?.sender },
             ]
         }).populate('messages').sort({ updatedAt: -1 });
 
@@ -105,11 +105,11 @@ io.on("connection", async (socket) => {
     });
 
     //sidebar
-    socket.on("sidebar", async (currrentUserId) => {
-        console.log('sidebar', currrentUserId)
+    socket.on("sidebar", async(currrentUserId) => {
+        // console.log('sidebar', currrentUserId)
 
         const currrentUserConversation = await ConvoModel.find({
-            "$or": [
+            $or: [
                 { sender: currrentUserId },
                 { receiver: currrentUserId }
             ]
@@ -125,7 +125,7 @@ io.on("connection", async (socket) => {
                 sender:conv?.sender,
                 receiver:conv?.receiver,
                 unseenMsg: countUnseenMsg,
-                lastMsg:conv?.messages[conv?.messages?.lenght - 1]
+                lastMsg: conv?.messages[conv?.messages?.length - 1]
             }
         })
 
