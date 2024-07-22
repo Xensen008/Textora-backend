@@ -1,12 +1,11 @@
 const express = require('express');
 const { Server } = require('socket.io');
 const http = require('http');
-const userDataToken = require('../utils/extractToken');
-const UserModel = require('../models/user.model');
-const { ConvoModel, MessageModel } = require('../models/convo.model');
-require('dotenv').config();
-
 const app = express();
+const userDataToken = require('../utils/extractToken');  
+const UserModel = require('../models/user.model');
+require('dotenv').config(); 
+
 const server = http.createServer(app);
 
 // Initialize Socket.IO server with CORS settings
@@ -16,34 +15,37 @@ const io = new Server(server, {
         credentials: true
     }
 });
+// online status
+const onlineUser=  new Set()
 
-// Set to keep track of online users
-const onlineUsers = new Set();
-
+// Handle socket connection
 io.on("connection", async (socket) => {
     console.log("User connected:", socket.id);
 
-    const token = socket.handshake.auth.token;
+    
+    const token = socket?.handshake.auth.token;
     const user = await userDataToken(token);
+    
+    //create a room
+    socket.join(user?._id);
+    onlineUser.add(user?._id?.toString())
 
-    // Join a room for the connected user
-    socket.join(user._id.toString());
-    onlineUsers.add(user._id.toString());
+    io.emit('onlineUser', Array.from(onlineUser));
+    
+    socket.on('message-page',async(userId)=>{
+        // console.log('userId',userId)
+        const userDetails= await UserModel.findById(userId).select("-password")
 
-    // Notify all users about the online status
-    io.emit('onlineUsers', Array.from(onlineUsers));
-
-    socket.on('message-page', async (userId) => {
-        const userDetails = await UserModel.findById(userId).select("-password");
         const payload = {
-            _id: userDetails._id,
-            name: userDetails.name,
-            email: userDetails.email,
-            profile_pic: userDetails.profile_pic,
-            online: onlineUsers.has(userId.toString()),
-        };
-        socket.emit('message-user', payload);
-    });
+            _id :userDetails?._id,
+            name : userDetails?.name,
+            email: userDetails?.email,
+            profile_pic: userDetails?.profile_pic,
+            online: onlineUser.has(userId),
+        }
+        socket.emit('message-user',payload)
+        
+    })
 
     socket.on("new message", async (data) => {
         let conversation = await ConvoModel.findOne({
@@ -82,10 +84,13 @@ io.on("connection", async (socket) => {
         io.to(data.receiver).emit('new message', updatedConversation.messages);
     });
 
+
+    // Handle socket disconnection
     socket.on("disconnect", () => {
-        onlineUsers.delete(user._id.toString());
+        onlineUser.delete(user?._id?.toString()); 
         console.log("User disconnected:", socket.id);
     });
 });
 
+// Export the Express app and HTTP server
 module.exports = { app, server };
