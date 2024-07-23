@@ -4,10 +4,10 @@ const http = require('http');
 const app = express();
 const userDataToken = require('../utils/extractToken');
 const UserModel = require('../models/user.model');
-require('dotenv').config();
 const { ConvoModel, MessageModel } = require('../models/convo.model');
-const mongoose = require('mongoose');
 const { isValidObjectId } = require('mongoose');
+const getConversation = require("../utils/getConversation");
+require('dotenv').config();
 
 const server = http.createServer(app);
 
@@ -19,8 +19,8 @@ const io = new Server(server, {
     }
 });
 
-// online status
-const onlineUser = new Set();
+// Online users set
+const onlineUsers = new Set();
 
 // Handle socket connection
 io.on("connection", async (socket) => {
@@ -35,42 +35,36 @@ io.on("connection", async (socket) => {
         return;
     }
 
-    socket.join(user._id.toString());
-    onlineUser.add(user._id.toString());
+    const userId = user._id.toString();
+    socket.join(userId);
+    onlineUsers.add(userId);
+    io.emit('onlineUser', Array.from(onlineUsers));
 
-    io.emit('onlineUser', Array.from(onlineUser));
-
-    socket.on('message-page', async (userId) => {
-        if (!isValidObjectId(userId)) {
-            console.error('Invalid userId:', userId);
+    socket.on('message-page', async (targetUserId) => {
+        if (!isValidObjectId(targetUserId)) {
+            console.error('Invalid userId:', targetUserId);
             socket.emit('error', 'Invalid userId');
             return;
         }
 
-        console.log('userId', userId);
-        const userDetails = await UserModel.findById(userId).select("-password");
-
+        const userDetails = await UserModel.findById(targetUserId).select("-password");
         const payload = {
             _id: userDetails?._id,
             name: userDetails?.name,
             email: userDetails?.email,
             profile_pic: userDetails?.profile_pic,
-            online: onlineUser.has(userId),
+            online: onlineUsers.has(targetUserId),
         };
         socket.emit('message-user', payload);
 
-        const getConversationMessage = await ConvoModel.findOne({
+        const conversation = await ConvoModel.findOne({
             "$or": [
-                { sender: user._id, receiver: userId },
-                { sender: userId, receiver: user._id },
+                { sender: userId, receiver: targetUserId },
+                { sender: targetUserId, receiver: userId },
             ]
         }).populate('messages').sort({ updatedAt: -1 });
 
-        if (getConversationMessage) {
-            socket.emit('message', getConversationMessage.messages);
-        } else {
-            socket.emit('message', []);
-        }
+        socket.emit('message', conversation ? conversation.messages : []);
     });
 
     socket.on("new message", async (data) => {
@@ -88,37 +82,40 @@ io.on("connection", async (socket) => {
         });
 
         if (!conversation) {
-            const createConversation = new ConvoModel({
+            conversation = await new ConvoModel({
                 sender: data.sender,
                 receiver: data.receiver,
-            });
-            conversation = await createConversation.save();
+            }).save();
         }
 
-        const message = new MessageModel({
+        const message = await new MessageModel({
             text: data.text,
             imageUrl: data.imageUrl,
             videoUrl: data.videoUrl,
             msgByUserId: data.msgByUserId,
-        });
-
-        const saveMessage = await message.save();
+        }).save();
 
         await ConvoModel.updateOne(
             { _id: conversation._id },
-            { "$push": { messages: saveMessage._id } },
+            { "$push": { messages: message._id } },
             { new: true }
         );
 
-        const getConversationMessage = await ConvoModel.findOne({
+        const updatedConversation = await ConvoModel.findOne({
             "$or": [
                 { sender: data.sender, receiver: data.receiver },
                 { sender: data.receiver, receiver: data.sender },
             ]
         }).populate('messages').sort({ updatedAt: -1 });
 
-        io.to(data.sender).emit('message', getConversationMessage.messages);
-        io.to(data.receiver).emit('message', getConversationMessage.messages);
+        io.to(data.sender).emit('message', updatedConversation.messages);
+        io.to(data.receiver).emit('message', updatedConversation.messages);
+
+        const conversationSender = await getConversation(data.sender);
+        const conversationReceiver = await getConversation(data.receiver);
+
+        io.to(data.sender).emit('conversation', conversationSender);
+        io.to(data.receiver).emit('conversation', conversationReceiver);
     });
 
     socket.on('sidebar', async (currentUserId) => {
@@ -127,38 +124,51 @@ io.on("connection", async (socket) => {
             socket.emit('error', 'Invalid currentUserId');
             return;
         }
+        const conversation = await getConversation(currentUserId);
+        socket.emit('conversation', conversation);
+    });
 
-        console.log('currentUser', currentUserId);
+    socket.on('seen', async (msgByUserId) => {
+        if (!isValidObjectId(msgByUserId)) {
+            console.error('Invalid msgByUserId:', msgByUserId);
+            return;
+        }
 
-        if (currentUserId) {
-            const currentUserConversation = await ConvoModel.find({
+        try {
+            const conversation = await ConvoModel.findOne({
                 "$or": [
-                    { sender: currentUserId },
-                    { receiver: currentUserId }
+                    { sender: msgByUserId, receiver: userId },
+                    { sender: userId, receiver: msgByUserId },
                 ]
-            }).sort({ updatedAt: -1 }).populate('messages').populate('sender').populate('receiver');
-
-            // console.log("currentUserConversation", currentUserConversation);
-
-            const conversation = currentUserConversation.map((conv) => {
-                const countUnseenMsg = conv.messages.reduce((prev, curr) => prev + (curr.seen ? 0 : 1), 0);
-
-                return {
-                    _id: conv._id,
-                    sender: conv.sender,
-                    receiver: conv.receiver,
-                    unseenMsg: countUnseenMsg,
-                    lastMsg: conv.messages[conv.messages.length - 1]
-                };
             });
 
-            socket.emit('conversation', conversation);
+            if (!conversation) {
+                console.error('Conversation not found');
+                return;
+            }
+
+            const conversationMessageIds = conversation.messages || [];
+            await MessageModel.updateMany({
+                _id: { $in: conversationMessageIds },
+                msgByUserId: { $ne: userId },
+                seen: false,
+            }, { seen: true });
+
+            const conversationSender = await getConversation(userId);
+            const conversationReceiver = await getConversation(msgByUserId);
+
+            io.to(userId).emit('conversation', conversationSender);
+            io.to(msgByUserId).emit('conversation', conversationReceiver);
+            io.to(msgByUserId).emit('messages-seen', userId);
+        } catch (error) {
+            console.error('Error in seen handler:', error);
         }
     });
 
     socket.on("disconnect", () => {
-        onlineUser.delete(user._id.toString());
+        onlineUsers.delete(userId);
         console.log("User disconnected:", socket.id);
+        io.emit('onlineUser', Array.from(onlineUsers));
     });
 });
 
