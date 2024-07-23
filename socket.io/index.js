@@ -6,6 +6,7 @@ const userDataToken = require('../utils/extractToken');
 const UserModel = require('../models/user.model');
 require('dotenv').config();
 const { ConvoModel, MessageModel } = require('../models/convo.model');
+const mongoose = require('mongoose');
 
 const server = http.createServer(app);
 
@@ -25,6 +26,7 @@ io.on("connection", async (socket) => {
 
 
     const token = socket?.handshake.auth.token;
+    //get current user
     const user = await userDataToken(token);
 
     //create a room
@@ -34,45 +36,50 @@ io.on("connection", async (socket) => {
     io.emit('onlineUser', Array.from(onlineUser));
 
     socket.on('message-page', async (userId) => {
-        // console.log('userId',userId)
-        const userDetails = await UserModel.findById(userId).select("-password")
-
+        console.log('userId', userId);
+        const userDetails = await UserModel.findById(userId).select("-password");
+    
         const payload = {
             _id: userDetails?._id,
             name: userDetails?.name,
             email: userDetails?.email,
             profile_pic: userDetails?.profile_pic,
             online: onlineUser.has(userId),
-        }
-        socket.emit('message-user', payload)
-
-        //get previous message load
-        const getConversation = await ConvoModel.findOne({
-            $or: [
+        };
+        socket.emit('message-user', payload);
+    
+        // get previous message load
+        const getConversationMessage = await ConvoModel.findOne({
+            "$or": [
                 { sender: user?._id, receiver: userId },
                 { sender: userId, receiver: user?._id },
             ]
         }).populate('messages').sort({ updatedAt: -1 });
-
-        socket.emit('messages', getConversation.messages)
-
-    })
+    
+        if (getConversationMessage) {
+            socket.emit('message', getConversationMessage.messages);
+        } else {
+            socket.emit('message', []); 
+        }
+    });
+    
 
 
     //new message
+    // Ensure conversation is reassigned after creating it
     socket.on("new message", async (data) => {
         let conversation = await ConvoModel.findOne({
-            $or: [
+            "$or": [
                 { sender: data?.sender, receiver: data?.receiver },
                 { sender: data?.receiver, receiver: data?.sender },
             ]
         });
 
         if (!conversation) {
-            const createConversation = await new ConvoModel({
-                sender: data.sender,
-                receiver: data.receiver,
-            })
+            const createConversation = await ConvoModel({
+                sender: data?.sender,
+                receiver: data?.receiver,
+            });
             conversation = await createConversation.save();
         }
 
@@ -80,66 +87,64 @@ io.on("connection", async (socket) => {
             text: data.text,
             imageUrl: data.imageUrl,
             videoUrl: data.videoUrl,
-            msgByUserId: data.msgByUserId,
+            msgByUserId: data?.msgByUserId,
         });
 
         const saveMessage = await message.save();
 
-        const updatedConversation = await ConvoModel.updateOne({
-            _id: conversation._id
-        }, {
-            $push: { messages: saveMessage._id }
-        }, {
-            new: true
-        })
+        await ConvoModel.updateOne(
+            { _id: conversation?._id },
+            { "$push": { messages: saveMessage?._id } },
+            { new: true }
+        );
 
-        const getConversation = await ConvoModel.findOne({
-            $or: [
-                { sender: data?.sender, receiver: data?.receiver },
-                { sender: data?.receiver, receiver: data?.sender },
+        const getConversationMessage = await ConvoModel.findOne({
+            "$or": [
+                { sender: data.sender, receiver: data.receiver },
+                { sender: data.receiver, receiver: data.sender },
             ]
         }).populate('messages').sort({ updatedAt: -1 });
 
-        io.to(data?.sender).emit('message', getConversation.messages);
-        io.to(data.receiver).emit('message', getConversation.messages);
+        io.to(data?.sender).emit('message', getConversationMessage.messages);
+        io.to(data?.receiver).emit('message', getConversationMessage.messages);
     });
 
-    //sidebar
-    socket.on("sidebar", async(currrentUserId) => {
-        // console.log('sidebar', currrentUserId)
+
+    // sidebar
+    socket.on('sidebar', async (currrentUserId) => {
+        console.log('currentUser', currrentUserId)
 
         const currrentUserConversation = await ConvoModel.find({
-            $or: [
+            "$or": [
                 { sender: currrentUserId },
                 { receiver: currrentUserId }
             ]
-        }).sort({ updatedAt: -1 }).populate('messages')
-        
-        // .populate('sender').populate('receiver');
+        }).sort({ updatedAt: -1 }).populate('messages').populate('sender').populate('receiver');
+        console.log("currrentUserConversation", currrentUserConversation)
 
-        const conversation = currrentUserConversation.map((conv)=>{
+        const conversation = currrentUserConversation.map((conv) => {
             const countUnseenMsg = conv.messages.reduce((prev, curr) => prev + (curr.seen ? 0 : 1), 0);
 
             return {
-                _id:conv?._id,
-                sender:conv?.sender,
-                receiver:conv?.receiver,
+                _id: conv?._id,
+                sender: conv?.sender,
+                receiver: conv?.receiver,
                 unseenMsg: countUnseenMsg,
-                lastMsg: conv?.messages[conv?.messages?.length - 1]
+                lastMsg: conv?.messages[conv?.messages?.lenght - 1]
             }
         })
 
-        socket.emit('conversation',conversation)
+        socket.emit('conversation', conversation)
     })
 
 
 
-        // Handle socket disconnection
-        socket.on("disconnect", () => {
-            onlineUser.delete(user?._id);
-            console.log("User disconnected:", socket.id);
-        });
+    // Handle socket disconnection
+    socket.on("disconnect", () => {
+        onlineUser.delete(user?._id);
+        console.log("User disconnected:", socket.id);
     });
+});
 
-    // Export the Express app and HTTP server
-    module.exports = { app, server };
+// Export the Express app and HTTP server
+module.exports = { app, server };
