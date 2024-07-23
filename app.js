@@ -30,14 +30,13 @@ app.use((err, req, res, next) => {
 });
 
 // Database connection and server start
-connectDB().then(() => {
-    server.listen(process.env.PORT || 8080, () => {
-        console.log(`Server running at http://localhost:${process.env.PORT || 8080}`);
-    });
-}).catch((error) => {
-    console.error("Database connection failed", error);
-});
-
-
-
-
+(async () => {
+    try {
+        await connectDB();
+        server.listen(process.env.PORT || 8080, () => {
+            console.log(`Server running at http://localhost:${process.env.PORT || 8080}`);
+        });
+    } catch (error) {
+        console.error("Database connection failed", error);
+    }
+})();
