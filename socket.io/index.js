@@ -145,42 +145,76 @@ io.on("connection", async (socket) => {
             }
         });
 
-        socket.on('seen', async (msgByUserId) => {
+        // In your socket.io connection setup
+        socket.on("new message", async (data) => {
             try {
-                if (!isValidObjectId(msgByUserId)) {
-                    console.error('Invalid msgByUserId:', msgByUserId);
+                // Validate sender and receiver IDs
+                if (!isValidObjectId(data.sender) || !isValidObjectId(data.receiver)) {
+                    console.error('Invalid sender or receiver ID:', data);
+                    socket.emit('error', 'Invalid sender or receiver ID');
                     return;
                 }
 
-                const conversation = await ConvoModel.findOne({
+                // Find or create a conversation
+                let conversation = await ConvoModel.findOne({
                     "$or": [
-                        { sender: msgByUserId, receiver: userId },
-                        { sender: userId, receiver: msgByUserId },
+                        { sender: data.sender, receiver: data.receiver },
+                        { sender: data.receiver, receiver: data.sender },
                     ]
                 });
 
                 if (!conversation) {
-                    console.error('Conversation not found');
-                    return;
+                    conversation = await new ConvoModel({
+                        sender: data.sender,
+                        receiver: data.receiver,
+                    }).save();
                 }
 
-                const conversationMessageIds = conversation.messages || [];
-                await MessageModel.updateMany({
-                    _id: { $in: conversationMessageIds },
-                    msgByUserId: msgByUserId,
-                    seen: false,
-                }, { seen: true });
+                // Create and save a new message
+                const message = await new MessageModel({
+                    text: data.text,
+                    imageUrl: data.imageUrl,
+                    videoUrl: data.videoUrl,
+                    msgByUserId: data.msgByUserId,
+                }).save();
 
-                const conversationSender = await getConversation(userId);
-                const conversationReceiver = await getConversation(msgByUserId);
+                // Update the conversation with the new message
+                await ConvoModel.updateOne(
+                    { _id: conversation._id },
+                    { "$push": { messages: message._id } },
+                    { new: true }
+                );
 
-                io.to(userId).emit('conversation', conversationSender);
-                io.to(msgByUserId).emit('conversation', conversationReceiver);
-                io.to(msgByUserId).emit('messages-seen', userId);
+                // Fetch updated conversation with populated messages
+                const updatedConversation = await ConvoModel.findOne({
+                    "$or": [
+                        { sender: data.sender, receiver: data.receiver },
+                        { sender: data.receiver, receiver: data.sender },
+                    ]
+                }).populate('messages').sort({ updatedAt: -1 });
+
+                // Emit the message to both sender and receiver rooms
+                io.to(data.sender).emit('message', {
+                    conversationId: conversation._id,
+                    messages: updatedConversation.messages
+                });
+                io.to(data.receiver).emit('message', {
+                    conversationId: conversation._id,
+                    messages: updatedConversation.messages
+                });
+
+                // Update sidebar conversations
+                const conversationSender = await getConversation(data.sender);
+                const conversationReceiver = await getConversation(data.receiver);
+
+                io.to(data.sender).emit('conversation', conversationSender);
+                io.to(data.receiver).emit('conversation', conversationReceiver);
             } catch (error) {
-                console.error('Error handling seen event:', error);
+                console.error('Error handling new message event:', error);
+                socket.emit('error', 'Internal server error');
             }
         });
+
 
         socket.on("disconnect", () => {
             onlineUsers.delete(userId);
