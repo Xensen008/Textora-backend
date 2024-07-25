@@ -4,7 +4,10 @@ async function logout(req,res){
             http :true,
             secure:true,
         }
-        return res.cookie('token','',cookieOption).status(200).json({
+        res.setHeader("Set-Cookie",[
+            `token=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=None`
+        ])
+        return res.status(200).json({
             messgae:"session out",
             success:true
         })
