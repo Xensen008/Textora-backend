@@ -108,6 +108,7 @@ io.on("connection", async (socket) => {
                 io.to(msgByUserId).emit('conversation', conversationReceiver);
                 io.to(msgByUserId).emit('messages-seen', userId);
             } catch (error) {
+                //handling error
                 console.error('Error handling seen event:', error);
             }
         });
