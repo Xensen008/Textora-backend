@@ -167,7 +167,7 @@ io.on("connection", async (socket) => {
                 const conversationMessageIds = conversation.messages || [];
                 await MessageModel.updateMany({
                     _id: { $in: conversationMessageIds },
-                    msgByUserId: { $ne: userId },
+                    msgByUserId: msgByUserId,
                     seen: false,
                 }, { seen: true });
 
