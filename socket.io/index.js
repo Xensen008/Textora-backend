@@ -122,14 +122,16 @@ io.on("connection", async (socket) => {
                     ]
                 }).populate('messages').sort({ updatedAt: -1 });
 
+                const populatedMessages = updatedConversation?.messages ?? [];
+
                 // Emit the message to both sender and receiver rooms
                 io.to(data.sender).emit('message', {
                     conversationId: conversation._id,
-                    messages: updatedConversation.messages
+                    messages: populatedMessages
                 });
                 io.to(data.receiver).emit('message', {
                     conversationId: conversation._id,
-                    messages: updatedConversation.messages
+                    messages: populatedMessages
                 });
 
                 // Update sidebar conversations
@@ -143,6 +145,7 @@ io.on("connection", async (socket) => {
                 socket.emit('error', 'Internal server error');
             }
         });
+
 
 
         socket.on('sidebar', async (currentUserId) => {
