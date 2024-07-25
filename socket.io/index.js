@@ -74,46 +74,61 @@ io.on("connection", async (socket) => {
             }
         });
 
-        // In your socket.io connection setup
-        socket.on('seen', async (msgByUserId) => {
+        socket.on("new message", async (data) => {
             try {
-                if (!isValidObjectId(msgByUserId)) {
-                    console.error('Invalid msgByUserId:', msgByUserId);
+                if (!isValidObjectId(data.sender) || !isValidObjectId(data.receiver)) {
+                    console.error('Invalid sender or receiver ID:', data);
+                    socket.emit('error', 'Invalid sender or receiver ID');
                     return;
                 }
 
-                const conversation = await ConvoModel.findOne({
+                let conversation = await ConvoModel.findOne({
                     "$or": [
-                        { sender: msgByUserId, receiver: userId },
-                        { sender: userId, receiver: msgByUserId },
+                        { sender: data.sender, receiver: data.receiver },
+                        { sender: data.receiver, receiver: data.sender },
                     ]
                 });
 
                 if (!conversation) {
-                    console.error('Conversation not found');
-                    return;
+                    conversation = await new ConvoModel({
+                        sender: data.sender,
+                        receiver: data.receiver,
+                    }).save();
                 }
 
-                const conversationMessageIds = conversation.messages || [];
-                await MessageModel.updateMany({
-                    _id: { $in: conversationMessageIds },
-                    msgByUserId: msgByUserId,
-                    seen: false,
-                }, { seen: true });
+                const message = await new MessageModel({
+                    text: data.text,
+                    imageUrl: data.imageUrl,
+                    videoUrl: data.videoUrl,
+                    msgByUserId: data.msgByUserId,
+                }).save();
 
-                const conversationSender = await getConversation(userId);
-                const conversationReceiver = await getConversation(msgByUserId);
+                await ConvoModel.updateOne(
+                    { _id: conversation._id },
+                    { "$push": { messages: message._id } },
+                    { new: true }
+                );
 
-                io.to(userId).emit('conversation', conversationSender);
-                io.to(msgByUserId).emit('conversation', conversationReceiver);
-                io.to(msgByUserId).emit('messages-seen', userId);
+                const updatedConversation = await ConvoModel.findOne({
+                    "$or": [
+                        { sender: data.sender, receiver: data.receiver },
+                        { sender: data.receiver, receiver: data.sender },
+                    ]
+                }).populate('messages').sort({ updatedAt: -1 });
+
+                io.to(data.sender).emit('message', updatedConversation.messages);
+                io.to(data.receiver).emit('message', updatedConversation.messages);
+
+                const conversationSender = await getConversation(data.sender);
+                const conversationReceiver = await getConversation(data.receiver);
+
+                io.to(data.sender).emit('conversation', conversationSender);
+                io.to(data.receiver).emit('conversation', conversationReceiver);
             } catch (error) {
-                //handling error
-                console.error('Error handling seen event:', error);
+                console.error('Error handling new message event:', error);
+                socket.emit('error', 'Internal server error');
             }
         });
-
-
 
         socket.on('sidebar', async (currentUserId) => {
             try {
@@ -152,7 +167,7 @@ io.on("connection", async (socket) => {
                 const conversationMessageIds = conversation.messages || [];
                 await MessageModel.updateMany({
                     _id: { $in: conversationMessageIds },
-                    msgByUserId: msgByUserId,
+                    msgByUserId: { $ne: userId },
                     seen: false,
                 }, { seen: true });
 
