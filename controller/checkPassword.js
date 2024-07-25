@@ -25,7 +25,7 @@ async function checkPassword(req, res) {
         //     secure: true,
         // }
         res.setHeader("Set-Cookie", [
-            `token=${token}; Max-Age=${1*24*60*60}; Path =/; HttpOnly; Secure; SameSite=None`,
+            `token=${token}; Max-Age=${7*24*60*60}; Path =/; HttpOnly; Secure; SameSite=None`,
               ]);
 
         return res.status(200).json({
