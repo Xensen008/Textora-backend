@@ -74,77 +74,6 @@ io.on("connection", async (socket) => {
             }
         });
 
-        socket.on("new message", async (data) => {
-            try {
-                if (!isValidObjectId(data.sender) || !isValidObjectId(data.receiver)) {
-                    console.error('Invalid sender or receiver ID:', data);
-                    socket.emit('error', 'Invalid sender or receiver ID');
-                    return;
-                }
-
-                let conversation = await ConvoModel.findOne({
-                    "$or": [
-                        { sender: data.sender, receiver: data.receiver },
-                        { sender: data.receiver, receiver: data.sender },
-                    ]
-                });
-
-                if (!conversation) {
-                    conversation = await new ConvoModel({
-                        sender: data.sender,
-                        receiver: data.receiver,
-                    }).save();
-                }
-
-                const message = await new MessageModel({
-                    text: data.text,
-                    imageUrl: data.imageUrl,
-                    videoUrl: data.videoUrl,
-                    msgByUserId: data.msgByUserId,
-                }).save();
-
-                await ConvoModel.updateOne(
-                    { _id: conversation._id },
-                    { "$push": { messages: message._id } },
-                    { new: true }
-                );
-
-                const updatedConversation = await ConvoModel.findOne({
-                    "$or": [
-                        { sender: data.sender, receiver: data.receiver },
-                        { sender: data.receiver, receiver: data.sender },
-                    ]
-                }).populate('messages').sort({ updatedAt: -1 });
-
-                io.to(data.sender).emit('message', updatedConversation.messages);
-                io.to(data.receiver).emit('message', updatedConversation.messages);
-
-                const conversationSender = await getConversation(data.sender);
-                const conversationReceiver = await getConversation(data.receiver);
-
-                io.to(data.sender).emit('conversation', conversationSender);
-                io.to(data.receiver).emit('conversation', conversationReceiver);
-            } catch (error) {
-                console.error('Error handling new message event:', error);
-                socket.emit('error', 'Internal server error');
-            }
-        });
-
-        socket.on('sidebar', async (currentUserId) => {
-            try {
-                if (!isValidObjectId(currentUserId)) {
-                    console.error('Invalid currentUserId:', currentUserId);
-                    socket.emit('error', 'Invalid currentUserId');
-                    return;
-                }
-                const conversation = await getConversation(currentUserId);
-                socket.emit('conversation', conversation);
-            } catch (error) {
-                console.error('Error handling sidebar event:', error);
-                socket.emit('error', 'Internal server error');
-            }
-        });
-
         // In your socket.io connection setup
         socket.on("new message", async (data) => {
             try {
@@ -215,6 +144,58 @@ io.on("connection", async (socket) => {
             }
         });
 
+
+        socket.on('sidebar', async (currentUserId) => {
+            try {
+                if (!isValidObjectId(currentUserId)) {
+                    console.error('Invalid currentUserId:', currentUserId);
+                    socket.emit('error', 'Invalid currentUserId');
+                    return;
+                }
+                const conversation = await getConversation(currentUserId);
+                socket.emit('conversation', conversation);
+            } catch (error) {
+                console.error('Error handling sidebar event:', error);
+                socket.emit('error', 'Internal server error');
+            }
+        });
+
+        socket.on('seen', async (msgByUserId) => {
+            try {
+                if (!isValidObjectId(msgByUserId)) {
+                    console.error('Invalid msgByUserId:', msgByUserId);
+                    return;
+                }
+
+                const conversation = await ConvoModel.findOne({
+                    "$or": [
+                        { sender: msgByUserId, receiver: userId },
+                        { sender: userId, receiver: msgByUserId },
+                    ]
+                });
+
+                if (!conversation) {
+                    console.error('Conversation not found');
+                    return;
+                }
+
+                const conversationMessageIds = conversation.messages || [];
+                await MessageModel.updateMany({
+                    _id: { $in: conversationMessageIds },
+                    msgByUserId: msgByUserId,
+                    seen: false,
+                }, { seen: true });
+
+                const conversationSender = await getConversation(userId);
+                const conversationReceiver = await getConversation(msgByUserId);
+
+                io.to(userId).emit('conversation', conversationSender);
+                io.to(msgByUserId).emit('conversation', conversationReceiver);
+                io.to(msgByUserId).emit('messages-seen', userId);
+            } catch (error) {
+                console.error('Error handling seen event:', error);
+            }
+        });
 
         socket.on("disconnect", () => {
             onlineUsers.delete(userId);
