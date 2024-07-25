@@ -75,74 +75,40 @@ io.on("connection", async (socket) => {
         });
 
         // In your socket.io connection setup
-        socket.on("new message", async (data) => {
+        socket.on('seen', async (msgByUserId) => {
             try {
-                // Validate sender and receiver IDs
-                if (!isValidObjectId(data.sender) || !isValidObjectId(data.receiver)) {
-                    console.error('Invalid sender or receiver ID:', data);
-                    socket.emit('error', 'Invalid sender or receiver ID');
+                if (!isValidObjectId(msgByUserId)) {
+                    console.error('Invalid msgByUserId:', msgByUserId);
                     return;
                 }
 
-                // Find or create a conversation
-                let conversation = await ConvoModel.findOne({
+                const conversation = await ConvoModel.findOne({
                     "$or": [
-                        { sender: data.sender, receiver: data.receiver },
-                        { sender: data.receiver, receiver: data.sender },
+                        { sender: msgByUserId, receiver: userId },
+                        { sender: userId, receiver: msgByUserId },
                     ]
                 });
 
                 if (!conversation) {
-                    conversation = await new ConvoModel({
-                        sender: data.sender,
-                        receiver: data.receiver,
-                    }).save();
+                    console.error('Conversation not found');
+                    return;
                 }
 
-                // Create and save a new message
-                const message = await new MessageModel({
-                    text: data.text,
-                    imageUrl: data.imageUrl,
-                    videoUrl: data.videoUrl,
-                    msgByUserId: data.msgByUserId,
-                }).save();
+                const conversationMessageIds = conversation.messages || [];
+                await MessageModel.updateMany({
+                    _id: { $in: conversationMessageIds },
+                    msgByUserId: msgByUserId,
+                    seen: false,
+                }, { seen: true });
 
-                // Update the conversation with the new message
-                await ConvoModel.updateOne(
-                    { _id: conversation._id },
-                    { "$push": { messages: message._id } },
-                    { new: true }
-                );
+                const conversationSender = await getConversation(userId);
+                const conversationReceiver = await getConversation(msgByUserId);
 
-                // Fetch updated conversation with populated messages
-                const updatedConversation = await ConvoModel.findOne({
-                    "$or": [
-                        { sender: data.sender, receiver: data.receiver },
-                        { sender: data.receiver, receiver: data.sender },
-                    ]
-                }).populate('messages').sort({ updatedAt: -1 });
-
-                const populatedMessages = updatedConversation?.messages ?? [];
-
-                // Emit the message to both sender and receiver rooms
-                io.to(data.sender).emit('message', {
-                    conversationId: conversation._id,
-                    messages: populatedMessages
-                });
-                io.to(data.receiver).emit('message', {
-                    conversationId: conversation._id,
-                    messages: populatedMessages
-                });
-
-                // Update sidebar conversations
-                const conversationSender = await getConversation(data.sender);
-                const conversationReceiver = await getConversation(data.receiver);
-
-                io.to(data.sender).emit('conversation', conversationSender);
-                io.to(data.receiver).emit('conversation', conversationReceiver);
+                io.to(userId).emit('conversation', conversationSender);
+                io.to(msgByUserId).emit('conversation', conversationReceiver);
+                io.to(msgByUserId).emit('messages-seen', userId);
             } catch (error) {
-                console.error('Error handling new message event:', error);
-                socket.emit('error', 'Internal server error');
+                console.error('Error handling seen event:', error);
             }
         });
 
