@@ -51,7 +51,15 @@ io.on("connection", async (socket) => {
         currentUserId = user._id.toString();
         socket.join(currentUserId);
         onlineUsers.add(currentUserId);
+        
+        // Notify all clients about the new online user
+        io.emit('user_status_change', { userId: currentUserId, status: 'online' });
         io.emit('onlineUser', Array.from(onlineUsers));
+
+        // Handle get-online-users request
+        socket.on('get-online-users', () => {
+            socket.emit('onlineUser', Array.from(onlineUsers));
+        });
 
         // Add handler for initial conversations request
         socket.on('get-conversations', async () => {
@@ -266,13 +274,15 @@ io.on("connection", async (socket) => {
             }
         });
 
-        socket.on("disconnect", () => {
+        // Handle disconnection
+        socket.on('disconnect', () => {
             if (currentUserId) {
                 onlineUsers.delete(currentUserId);
-                activeConversations.delete(currentUserId);
-                console.log("User disconnected:", socket.id);
+                // Notify all clients about the user going offline
+                io.emit('user_status_change', { userId: currentUserId, status: 'offline' });
                 io.emit('onlineUser', Array.from(onlineUsers));
             }
+            console.log('User disconnected:', socket.id);
         });
 
     } catch (error) {
