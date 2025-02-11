@@ -89,8 +89,13 @@ io.on("connection", async (socket) => {
                     name: userDetails?.name,
                     email: userDetails?.email,
                     profile_pic: userDetails?.profile_pic,
-                    online: onlineUsers.has(targetUserId),
                 };
+
+                // Send current online status immediately when opening chat
+                socket.emit('user_status_change', { 
+                    userId: targetUserId, 
+                    status: onlineUsers.has(targetUserId) ? 'online' : 'offline' 
+                });
 
                 const conversation = await ConvoModel.findOne({
                     "$or": [
