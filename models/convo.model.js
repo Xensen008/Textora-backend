@@ -22,6 +22,11 @@ const messageSchema = new mongoose.Schema({
         type: mongoose.Schema.ObjectId,
         required: true,
         ref: 'User'
+    },
+    conversationId: {
+        type: mongoose.Schema.ObjectId,
+        required: true,
+        ref: 'Conversation'
     }
 },{
     timestamps: true
@@ -41,6 +46,14 @@ const convoSchema = new mongoose.Schema({
         type: mongoose.Schema.ObjectId,
         ref: "Message"
     }],
+    lastMsg: {
+        type: mongoose.Schema.ObjectId,
+        ref: "Message"
+    },
+    lastMessageAt: {
+        type: Date,
+        default: Date.now
+    }
 },{
     timestamps: true
 })
