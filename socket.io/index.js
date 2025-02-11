@@ -29,17 +29,14 @@ const io = new Server(server, {
     cookie: false
 });
 
-// Debug socket connection issues
-io.engine.on("connection_error", (err) => {
-    console.log("Connection error:", err.code, err.message, err.context);
-});
-
-// Online users set
+// Track active conversations
+const activeConversations = new Map(); // userId -> conversationId
 const onlineUsers = new Set();
 
 // Handle socket connection
 io.on("connection", async (socket) => {
     console.log("User connected:", socket.id);
+    let currentUserId = null;
 
     try {
         const token = socket?.handshake.auth.token;
@@ -51,9 +48,9 @@ io.on("connection", async (socket) => {
             return;
         }
 
-        const userId = user._id.toString();
-        socket.join(userId);
-        onlineUsers.add(userId);
+        currentUserId = user._id.toString();
+        socket.join(currentUserId);
+        onlineUsers.add(currentUserId);
         io.emit('onlineUser', Array.from(onlineUsers));
 
         socket.on('message-page', async (targetUserId) => {
@@ -75,24 +72,67 @@ io.on("connection", async (socket) => {
 
                 const conversation = await ConvoModel.findOne({
                     "$or": [
-                        { sender: userId, receiver: targetUserId },
-                        { sender: targetUserId, receiver: userId },
+                        { sender: currentUserId, receiver: targetUserId },
+                        { sender: targetUserId, receiver: currentUserId },
                     ]
                 }).populate('messages').sort({ updatedAt: -1 });
 
-                socket.emit('message-user', {
-                    user: payload,
-                    conversationId: conversation?._id
-                });
+                if (conversation) {
+                    // Store active conversation for this user
+                    activeConversations.set(currentUserId, conversation._id.toString());
 
-                socket.emit('message', {
-                    messages: conversation ? conversation.messages : [],
-                    conversationId: conversation?._id,
-                    participants: {
-                        sender: userId,
-                        receiver: targetUserId
-                    }
-                });
+                    // Mark messages as seen
+                    await MessageModel.updateMany({
+                        conversationId: conversation._id,
+                        msgByUserId: targetUserId,
+                        seen: false
+                    }, { seen: true });
+
+                    // Get updated conversation
+                    const updatedConversation = await ConvoModel.findById(conversation._id)
+                        .populate('messages')
+                        .populate('lastMsg')
+                        .sort({ updatedAt: -1 });
+
+                    socket.emit('message-user', {
+                        user: payload,
+                        conversationId: updatedConversation._id
+                    });
+
+                    socket.emit('message', {
+                        messages: updatedConversation.messages,
+                        conversationId: updatedConversation._id,
+                        participants: {
+                            sender: currentUserId,
+                            receiver: targetUserId
+                        }
+                    });
+
+                    // Update sidebar for both users
+                    const [conversationSender, conversationReceiver] = await Promise.all([
+                        getConversation(currentUserId),
+                        getConversation(targetUserId)
+                    ]);
+
+                    socket.emit('conversation', {
+                        conversations: conversationSender,
+                        currentConversationId: updatedConversation._id
+                    });
+                    
+                    socket.to(targetUserId).emit('conversation', {
+                        conversations: conversationReceiver,
+                        currentConversationId: updatedConversation._id
+                    });
+
+                    socket.to(targetUserId).emit('messages-seen', currentUserId);
+                } else {
+                    socket.emit('message-user', { user: payload, conversationId: null });
+                    socket.emit('message', {
+                        messages: [],
+                        conversationId: null,
+                        participants: { sender: currentUserId, receiver: targetUserId }
+                    });
+                }
             } catch (error) {
                 console.error('Error handling message-page event:', error);
                 socket.emit('error', 'Internal server error');
@@ -121,6 +161,9 @@ io.on("connection", async (socket) => {
                     }).save();
                 }
 
+                // Check if receiver is viewing this conversation
+                const isReceiverActive = activeConversations.get(data.receiver) === conversation._id.toString();
+
                 // Create and save the new message
                 const message = await new MessageModel({
                     text: data.text,
@@ -128,16 +171,16 @@ io.on("connection", async (socket) => {
                     videoUrl: data.videoUrl,
                     msgByUserId: data.msgByUserId,
                     conversationId: conversation._id,
-                    seen: false
+                    seen: isReceiverActive
                 }).save();
 
-                // Update conversation with new message
+                // Update conversation
                 conversation.messages.push(message._id);
                 conversation.lastMsg = message._id;
                 conversation.lastMessageAt = new Date();
                 await conversation.save();
 
-                // Get updated conversation with populated messages
+                // Get updated conversation
                 const updatedConversation = await ConvoModel.findById(conversation._id)
                     .populate({
                         path: 'messages',
@@ -146,35 +189,51 @@ io.on("connection", async (socket) => {
                     .populate('lastMsg')
                     .exec();
 
-                // Send message update to both participants
-                const messageUpdate = {
-                    messages: updatedConversation.messages,
-                    conversationId: conversation._id,
-                    participants: {
-                        sender: data.sender,
-                        receiver: data.receiver
-                    }
-                };
+                // Send message update only if user is viewing this conversation
+                const senderActiveConvo = activeConversations.get(data.sender);
+                const receiverActiveConvo = activeConversations.get(data.receiver);
 
-                // Emit to sender
-                socket.emit('message', messageUpdate);
-                
-                // Emit to receiver
-                socket.to(data.receiver).emit('message', messageUpdate);
+                if (senderActiveConvo === conversation._id.toString()) {
+                    socket.emit('message', {
+                        messages: updatedConversation.messages,
+                        conversationId: conversation._id,
+                        participants: {
+                            sender: data.sender,
+                            receiver: data.receiver
+                        }
+                    });
+                }
 
-                // Update sidebar for both participants
-                const conversationSender = await getConversation(data.sender);
-                const conversationReceiver = await getConversation(data.receiver);
+                if (receiverActiveConvo === conversation._id.toString()) {
+                    socket.to(data.receiver).emit('message', {
+                        messages: updatedConversation.messages,
+                        conversationId: conversation._id,
+                        participants: {
+                            sender: data.sender,
+                            receiver: data.receiver
+                        }
+                    });
+                }
+
+                // Always update sidebar for both participants
+                const [conversationSender, conversationReceiver] = await Promise.all([
+                    getConversation(data.sender),
+                    getConversation(data.receiver)
+                ]);
 
                 socket.emit('conversation', {
                     conversations: conversationSender,
-                    currentConversationId: conversation._id
+                    currentConversationId: senderActiveConvo
                 });
                 
                 socket.to(data.receiver).emit('conversation', {
                     conversations: conversationReceiver,
-                    currentConversationId: conversation._id
+                    currentConversationId: receiverActiveConvo
                 });
+
+                if (isReceiverActive) {
+                    socket.emit('messages-seen', data.receiver);
+                }
 
                 console.log('Message sent successfully:', message);
             } catch (error) {
@@ -183,96 +242,20 @@ io.on("connection", async (socket) => {
             }
         });
 
-        socket.on('sidebar', async (currentUserId) => {
-            try {
-                if (!isValidObjectId(currentUserId)) {
-                    console.error('Invalid currentUserId:', currentUserId);
-                    socket.emit('error', 'Invalid currentUserId');
-                    return;
-                }
-                const conversations = await getConversation(currentUserId);
-                socket.emit('conversation', {
-                    conversations: conversations,
-                    currentConversationId: null
-                });
-            } catch (error) {
-                console.error('Error handling sidebar event:', error);
-                socket.emit('error', 'Internal server error');
-            }
-        });
-
-        socket.on('seen', async (msgByUserId) => {
-            try {
-                if (!isValidObjectId(msgByUserId)) {
-                    console.error('Invalid msgByUserId:', msgByUserId);
-                    return;
-                }
-
-                const conversation = await ConvoModel.findOne({
-                    "$or": [
-                        { sender: msgByUserId, receiver: userId },
-                        { sender: userId, receiver: msgByUserId },
-                    ]
-                });
-
-                if (!conversation) {
-                    console.error('Conversation not found');
-                    return;
-                }
-
-                const conversationMessageIds = conversation.messages || [];
-                await MessageModel.updateMany({
-                    _id: { $in: conversationMessageIds },
-                    msgByUserId: { $ne: userId },
-                    seen: false,
-                }, { seen: true });
-
-                const conversationSender = await getConversation(userId);
-                const conversationReceiver = await getConversation(msgByUserId);
-
-                io.to(userId).emit('conversation', {
-                    conversations: conversationSender,
-                    currentConversationId: conversation._id
-                });
-                
-                io.to(msgByUserId).emit('conversation', {
-                    conversations: conversationReceiver,
-                    currentConversationId: conversation._id
-                });
-
-                // Update the messages in the current conversation
-                const updatedConversation = await ConvoModel.findById(conversation._id)
-                    .populate('messages')
-                    .sort({ updatedAt: -1 });
-
-                io.to(userId).emit('message', {
-                    messages: updatedConversation.messages,
-                    conversationId: conversation._id,
-                    participants: {
-                        sender: userId,
-                        receiver: msgByUserId
-                    }
-                });
-
-                io.to(msgByUserId).emit('message', {
-                    messages: updatedConversation.messages,
-                    conversationId: conversation._id,
-                    participants: {
-                        sender: msgByUserId,
-                        receiver: userId
-                    }
-                });
-
-                io.to(msgByUserId).emit('messages-seen', userId);
-            } catch (error) {
-                console.error('Error handling seen event:', error);
+        // Handle conversation leave
+        socket.on('leave-conversation', () => {
+            if (currentUserId) {
+                activeConversations.delete(currentUserId);
             }
         });
 
         socket.on("disconnect", () => {
-            onlineUsers.delete(userId);
-            console.log("User disconnected:", socket.id);
-            io.emit('onlineUser', Array.from(onlineUsers));
+            if (currentUserId) {
+                onlineUsers.delete(currentUserId);
+                activeConversations.delete(currentUserId);
+                console.log("User disconnected:", socket.id);
+                io.emit('onlineUser', Array.from(onlineUsers));
+            }
         });
 
     } catch (error) {
