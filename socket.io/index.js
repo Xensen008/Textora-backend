@@ -53,6 +53,20 @@ io.on("connection", async (socket) => {
         onlineUsers.add(currentUserId);
         io.emit('onlineUser', Array.from(onlineUsers));
 
+        // Add handler for initial conversations request
+        socket.on('get-conversations', async () => {
+            try {
+                const conversations = await getConversation(currentUserId);
+                socket.emit('conversations', {
+                    conversations,
+                    currentConversationId: null
+                });
+            } catch (error) {
+                console.error('Error fetching initial conversations:', error);
+                socket.emit('error', 'Failed to fetch conversations');
+            }
+        });
+
         socket.on('message-page', async (targetUserId) => {
             try {
                 if (!isValidObjectId(targetUserId)) {
@@ -114,12 +128,12 @@ io.on("connection", async (socket) => {
                         getConversation(targetUserId)
                     ]);
 
-                    socket.emit('conversation', {
+                    socket.emit('conversations', {
                         conversations: conversationSender,
                         currentConversationId: updatedConversation._id
                     });
                     
-                    socket.to(targetUserId).emit('conversation', {
+                    socket.to(targetUserId).emit('conversations', {
                         conversations: conversationReceiver,
                         currentConversationId: updatedConversation._id
                     });
@@ -222,13 +236,13 @@ io.on("connection", async (socket) => {
                 const senderActiveConvo = activeConversations.get(data.sender);
                 const receiverActiveConvo = activeConversations.get(data.receiver);
 
-                socket.emit('conversation', {
+                socket.emit('conversations', {
                     conversations: conversationSender,
                     currentConversationId: senderActiveConvo,
                     isNewConversation
                 });
                 
-                socket.to(data.receiver).emit('conversation', {
+                socket.to(data.receiver).emit('conversations', {
                     conversations: conversationReceiver,
                     currentConversationId: receiverActiveConvo,
                     isNewConversation
