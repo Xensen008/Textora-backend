@@ -154,10 +154,13 @@ io.on("connection", async (socket) => {
                     ]
                 });
 
+                let isNewConversation = false;
                 if (!conversation) {
+                    isNewConversation = true;
                     conversation = await new ConvoModel({
                         sender: data.sender,
                         receiver: data.receiver,
+                        messages: [],
                     }).save();
                 }
 
@@ -180,55 +183,55 @@ io.on("connection", async (socket) => {
                 conversation.lastMessageAt = new Date();
                 await conversation.save();
 
-                // Get updated conversation
+                // Get updated conversation with populated fields
                 const updatedConversation = await ConvoModel.findById(conversation._id)
                     .populate({
                         path: 'messages',
                         options: { sort: { 'createdAt': 1 } }
                     })
                     .populate('lastMsg')
+                    .populate('sender')
+                    .populate('receiver')
                     .exec();
 
-                // Send message update only if user is viewing this conversation
-                const senderActiveConvo = activeConversations.get(data.sender);
-                const receiverActiveConvo = activeConversations.get(data.receiver);
+                // Send message update to both users
+                const messagePayload = {
+                    messages: updatedConversation.messages,
+                    conversationId: conversation._id,
+                    participants: {
+                        sender: data.sender,
+                        receiver: data.receiver
+                    }
+                };
 
-                if (senderActiveConvo === conversation._id.toString()) {
-                    socket.emit('message', {
-                        messages: updatedConversation.messages,
-                        conversationId: conversation._id,
-                        participants: {
-                            sender: data.sender,
-                            receiver: data.receiver
-                        }
-                    });
+                // Always emit to sender
+                socket.emit('message', messagePayload);
+                
+                // Emit to receiver if they're active
+                if (isReceiverActive) {
+                    socket.to(data.receiver).emit('message', messagePayload);
                 }
 
-                if (receiverActiveConvo === conversation._id.toString()) {
-                    socket.to(data.receiver).emit('message', {
-                        messages: updatedConversation.messages,
-                        conversationId: conversation._id,
-                        participants: {
-                            sender: data.sender,
-                            receiver: data.receiver
-                        }
-                    });
-                }
-
-                // Always update sidebar for both participants
+                // Get updated conversations for both users
                 const [conversationSender, conversationReceiver] = await Promise.all([
                     getConversation(data.sender),
                     getConversation(data.receiver)
                 ]);
 
+                // If it's a new conversation, force both users to update their conversation lists
+                const senderActiveConvo = activeConversations.get(data.sender);
+                const receiverActiveConvo = activeConversations.get(data.receiver);
+
                 socket.emit('conversation', {
                     conversations: conversationSender,
-                    currentConversationId: senderActiveConvo
+                    currentConversationId: senderActiveConvo,
+                    isNewConversation
                 });
                 
                 socket.to(data.receiver).emit('conversation', {
                     conversations: conversationReceiver,
-                    currentConversationId: receiverActiveConvo
+                    currentConversationId: receiverActiveConvo,
+                    isNewConversation
                 });
 
                 if (isReceiverActive) {
