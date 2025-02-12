@@ -314,10 +314,8 @@ io.on("connection", async (socket) => {
                     return;
                 }
 
-                // Mark message as deleted
-                message.deleted = true;
-                await message.save();
-                console.log('Message marked as deleted:', messageId);
+                // Update message to mark as deleted
+                await MessageModel.findByIdAndUpdate(messageId, { deleted: true });
 
                 // Update conversation
                 const conversation = await ConvoModel.findById(conversationId);
@@ -328,12 +326,17 @@ io.on("connection", async (socket) => {
 
                 // If this was the last message, update lastMsg to the previous non-deleted message
                 if (conversation.lastMsg && conversation.lastMsg.toString() === messageId) {
-                    const messages = await MessageModel.find({
+                    const lastNonDeletedMessage = await MessageModel.findOne({
                         _id: { $in: conversation.messages },
+                        _id: { $ne: messageId },
                         deleted: { $ne: true }
-                    }).sort({ createdAt: -1 }).limit(1);
-                    
-                    conversation.lastMsg = messages[0]?._id || null;
+                    }).sort({ createdAt: -1 });
+
+                    if (lastNonDeletedMessage) {
+                        conversation.lastMsg = lastNonDeletedMessage._id;
+                    } else {
+                        conversation.lastMsg = null;
+                    }
                     await conversation.save();
                 }
 
@@ -357,9 +360,6 @@ io.on("connection", async (socket) => {
                     conversationId: conversation._id,
                     deletedMessageId: messageId
                 };
-
-                console.log('Sending delete update to users:', currentUserId, otherUserId);
-                console.log('Message payload:', messagePayload);
 
                 // Emit to both users
                 socket.emit('message', messagePayload);
