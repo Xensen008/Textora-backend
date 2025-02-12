@@ -18,6 +18,10 @@ const messageSchema = new mongoose.Schema({
         type:Boolean,
         default:false
     },
+    deleted: {
+        type: Boolean,
+        default: false
+    },
     msgByUserId:{
         type: mongoose.Schema.ObjectId,
         required: true,

@@ -279,6 +279,117 @@ io.on("connection", async (socket) => {
             }
         });
 
+        // Handle message deletion
+        socket.on('delete_message', async ({ messageId, conversationId }) => {
+            try {
+                if (!isValidObjectId(messageId) || !isValidObjectId(conversationId)) {
+                    socket.emit('error', 'Invalid message or conversation ID');
+                    return;
+                }
+
+                // Find and verify the message
+                const message = await MessageModel.findById(messageId);
+                if (!message) {
+                    socket.emit('error', 'Message not found');
+                    return;
+                }
+                
+                if (message.msgByUserId.toString() !== currentUserId) {
+                    socket.emit('error', 'Unauthorized to delete this message');
+                    return;
+                }
+
+                // Mark message as deleted
+                message.deleted = true;
+                await message.save();
+                console.log('Message marked as deleted:', messageId);
+
+                // Update conversation
+                const conversation = await ConvoModel.findById(conversationId);
+                if (!conversation) {
+                    socket.emit('error', 'Conversation not found');
+                    return;
+                }
+
+                // If this was the last message, update lastMsg to the previous non-deleted message
+                if (conversation.lastMsg && conversation.lastMsg.toString() === messageId) {
+                    const messages = await MessageModel.find({
+                        _id: { $in: conversation.messages },
+                        deleted: { $ne: true }
+                    }).sort({ createdAt: -1 }).limit(1);
+                    
+                    conversation.lastMsg = messages[0]?._id || null;
+                    await conversation.save();
+                }
+
+                // Get updated conversation with populated fields
+                const updatedConversation = await ConvoModel.findById(conversationId)
+                    .populate({
+                        path: 'messages',
+                        options: { sort: { 'createdAt': 1 } }
+                    })
+                    .populate('lastMsg')
+                    .exec();
+
+                // Get both users' IDs from the conversation
+                const otherUserId = conversation.sender.toString() === currentUserId 
+                    ? conversation.receiver.toString() 
+                    : conversation.sender.toString();
+
+                // Prepare message payload
+                const messagePayload = {
+                    messages: updatedConversation.messages,
+                    conversationId: conversation._id,
+                    deletedMessageId: messageId
+                };
+
+                console.log('Sending delete update to users:', currentUserId, otherUserId);
+                console.log('Message payload:', messagePayload);
+
+                // Emit to both users
+                socket.emit('message', messagePayload);
+                io.to(otherUserId).emit('message', messagePayload);
+
+                // Update conversation lists for both users
+                const [conversationSender, conversationReceiver] = await Promise.all([
+                    getConversation(currentUserId),
+                    getConversation(otherUserId)
+                ]);
+
+                socket.emit('conversations', {
+                    conversations: conversationSender,
+                    currentConversationId: conversationId
+                });
+                
+                io.to(otherUserId).emit('conversations', {
+                    conversations: conversationReceiver,
+                    currentConversationId: conversationId
+                });
+
+                // Send success response
+                socket.emit('delete_success', { messageId });
+                
+                // Force immediate update for receiver
+                io.to(otherUserId).emit('force_message_update', { 
+                    messageId,
+                    conversationId
+                });
+            } catch (error) {
+                console.error('Error deleting message:', error);
+                socket.emit('error', 'Failed to delete message');
+            }
+        });
+
+        // Handle force message update
+        socket.on('force_message_update', ({ messageId, conversationId, receiverId }) => {
+            if (receiverId) {
+                io.to(receiverId).emit('force_message_update', { 
+                    messageId,
+                    conversationId
+                });
+            }
+        });
+
         // Handle disconnection
         socket.on('disconnect', () => {
             if (currentUserId) {
