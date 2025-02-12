@@ -83,12 +83,20 @@ io.on("connection", async (socket) => {
                     return;
                 }
 
+                const currentUser = await UserModel.findById(currentUserId).populate('blockedUsers');
                 const userDetails = await UserModel.findById(targetUserId).select("-password");
+                
+                // Check if user is blocked
+                const isBlocked = currentUser.blockedUsers.some(
+                    blockedUser => blockedUser._id.toString() === targetUserId
+                );
+
                 const payload = {
                     _id: userDetails?._id,
                     name: userDetails?.name,
                     email: userDetails?.email,
                     profile_pic: userDetails?.profile_pic,
+                    isBlocked
                 };
 
                 // Send current online status immediately when opening chat
@@ -127,12 +135,13 @@ io.on("connection", async (socket) => {
                     });
 
                     socket.emit('message', {
-                        messages: updatedConversation.messages,
+                        messages: isBlocked ? [] : updatedConversation.messages,
                         conversationId: updatedConversation._id,
                         participants: {
                             sender: currentUserId,
                             receiver: targetUserId
-                        }
+                        },
+                        isBlocked
                     });
 
                     // Update sidebar for both users
@@ -174,6 +183,17 @@ io.on("connection", async (socket) => {
                     return;
                 }
 
+                // Get both users to check blocking status
+                const [sender, receiver] = await Promise.all([
+                    UserModel.findById(data.sender).populate('blockedUsers'),
+                    UserModel.findById(data.receiver).populate('blockedUsers')
+                ]);
+
+                // Check if receiver has blocked sender
+                const isBlockedByReceiver = receiver.blockedUsers.some(
+                    blockedUser => blockedUser._id.toString() === data.sender
+                );
+
                 let conversation = await ConvoModel.findOne({
                     "$or": [
                         { sender: data.sender, receiver: data.receiver },
@@ -191,9 +211,6 @@ io.on("connection", async (socket) => {
                     }).save();
                 }
 
-                // Check if receiver is viewing this conversation
-                const isReceiverActive = activeConversations.get(data.receiver) === conversation._id.toString();
-
                 // Create and save the new message
                 const message = await new MessageModel({
                     text: data.text,
@@ -201,7 +218,7 @@ io.on("connection", async (socket) => {
                     videoUrl: data.videoUrl,
                     msgByUserId: data.msgByUserId,
                     conversationId: conversation._id,
-                    seen: isReceiverActive
+                    seen: false
                 }).save();
 
                 // Update conversation
@@ -210,7 +227,7 @@ io.on("connection", async (socket) => {
                 conversation.lastMessageAt = new Date();
                 await conversation.save();
 
-                // Get updated conversation with populated fields
+                // Get updated conversation
                 const updatedConversation = await ConvoModel.findById(conversation._id)
                     .populate({
                         path: 'messages',
@@ -221,51 +238,49 @@ io.on("connection", async (socket) => {
                     .populate('receiver')
                     .exec();
 
-                // Send message update to both users
-                const messagePayload = {
+                // Always send message back to sender
+                socket.emit('message', {
                     messages: updatedConversation.messages,
                     conversationId: conversation._id,
                     participants: {
                         sender: data.sender,
                         receiver: data.receiver
                     }
-                };
+                });
 
-                // Always emit to sender
-                socket.emit('message', messagePayload);
-                
-                // Emit to receiver if they're active
-                if (isReceiverActive) {
-                    socket.to(data.receiver).emit('message', messagePayload);
+                // Only send to receiver if they haven't blocked the sender
+                if (!isBlockedByReceiver) {
+                    const isReceiverActive = activeConversations.get(data.receiver) === conversation._id.toString();
+                    if (isReceiverActive) {
+                        socket.to(data.receiver).emit('message', {
+                            messages: updatedConversation.messages,
+                            conversationId: conversation._id,
+                            participants: {
+                                sender: data.sender,
+                                receiver: data.receiver
+                            }
+                        });
+                    }
                 }
 
-                // Get updated conversations for both users
+                // Update conversations for both users
                 const [conversationSender, conversationReceiver] = await Promise.all([
                     getConversation(data.sender),
                     getConversation(data.receiver)
                 ]);
 
-                // If it's a new conversation, force both users to update their conversation lists
-                const senderActiveConvo = activeConversations.get(data.sender);
-                const receiverActiveConvo = activeConversations.get(data.receiver);
-
                 socket.emit('conversations', {
                     conversations: conversationSender,
-                    currentConversationId: senderActiveConvo,
-                    isNewConversation
-                });
-                
-                socket.to(data.receiver).emit('conversations', {
-                    conversations: conversationReceiver,
-                    currentConversationId: receiverActiveConvo,
-                    isNewConversation
+                    currentConversationId: activeConversations.get(data.sender)
                 });
 
-                if (isReceiverActive) {
-                    socket.emit('messages-seen', data.receiver);
+                // Only update receiver's conversation list if they haven't blocked the sender
+                if (!isBlockedByReceiver) {
+                    socket.to(data.receiver).emit('conversations', {
+                        conversations: conversationReceiver,
+                        currentConversationId: activeConversations.get(data.receiver)
+                    });
                 }
-
-                console.log('Message sent successfully:', message);
             } catch (error) {
                 console.error('Error handling new message event:', error);
                 socket.emit('error', 'Internal server error');
@@ -399,6 +414,74 @@ io.on("connection", async (socket) => {
                 io.emit('onlineUser', Array.from(onlineUsers));
             }
             console.log('User disconnected:', socket.id);
+        });
+
+        // Handle block user
+        socket.on('block_user', async ({ userIdToBlock }) => {
+            try {
+                if (!isValidObjectId(userIdToBlock)) {
+                    socket.emit('error', 'Invalid user ID');
+                    return;
+                }
+
+                // Add user to blocked list
+                const updatedUser = await UserModel.findByIdAndUpdate(
+                    currentUserId,
+                    { $addToSet: { blockedUsers: userIdToBlock } },
+                    { new: true }
+                );
+
+                if (!updatedUser) {
+                    socket.emit('error', 'Failed to block user');
+                    return;
+                }
+
+                socket.emit('block_success', { blockedUserId: userIdToBlock });
+
+                // Update conversations to reflect blocked status
+                const conversations = await getConversation(currentUserId);
+                socket.emit('conversations', {
+                    conversations,
+                    currentConversationId: activeConversations.get(currentUserId)
+                });
+            } catch (error) {
+                console.error('Error blocking user:', error);
+                socket.emit('error', 'Failed to block user');
+            }
+        });
+
+        // Handle unblock user
+        socket.on('unblock_user', async ({ userIdToUnblock }) => {
+            try {
+                if (!isValidObjectId(userIdToUnblock)) {
+                    socket.emit('error', 'Invalid user ID');
+                    return;
+                }
+
+                // Remove user from blocked list
+                const updatedUser = await UserModel.findByIdAndUpdate(
+                    currentUserId,
+                    { $pull: { blockedUsers: userIdToUnblock } },
+                    { new: true }
+                );
+
+                if (!updatedUser) {
+                    socket.emit('error', 'Failed to unblock user');
+                    return;
+                }
+
+                socket.emit('unblock_success', { unblockedUserId: userIdToUnblock });
+
+                // Update conversations to reflect unblocked status
+                const conversations = await getConversation(currentUserId);
+                socket.emit('conversations', {
+                    conversations,
+                    currentConversationId: activeConversations.get(currentUserId)
+                });
+            } catch (error) {
+                console.error('Error unblocking user:', error);
+                socket.emit('error', 'Failed to unblock user');
+            }
         });
 
     } catch (error) {
