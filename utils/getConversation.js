@@ -4,9 +4,12 @@ const UserModel = require("../models/user.model");
 const getConversation = async (currentUserId) => {
     if (currentUserId) {
         try {
+            console.log("Fetching conversations for user:", currentUserId);
+            
             // Get current user with blocked users
             const currentUser = await UserModel.findById(currentUserId).select('blockedUsers');
             const blockedUserIds = currentUser?.blockedUsers?.map(id => id.toString()) || [];
+            console.log("Blocked users:", blockedUserIds);
 
             // Get all conversations with populated fields
             const currentUserConversation = await ConvoModel.find({
@@ -26,6 +29,8 @@ const getConversation = async (currentUserId) => {
                 path: 'lastMsg',
                 select: 'text imageUrl videoUrl createdAt msgByUserId'
             });
+
+            console.log("Found raw conversations:", currentUserConversation.length);
 
             // Filter and format conversations
             const conversation = currentUserConversation
@@ -71,6 +76,7 @@ const getConversation = async (currentUserId) => {
                     };
                 });
 
+            console.log("Returning processed conversations:", conversation.length);
             return conversation;
         } catch (error) {
             console.error('Error in getConversation:', error);
