@@ -52,6 +52,59 @@ io.on("connection", async (socket) => {
         socket.join(currentUserId);
         onlineUsers.add(currentUserId);
         
+        // When user comes online, mark pending messages as delivered
+        const markMessagesAsDelivered = async () => {
+            try {
+                // Update all undelivered messages in one query
+                const result = await MessageModel.updateMany(
+                    {
+                        status: 'sent',
+                        deleted: { $ne: true },
+                        msgByUserId: { $ne: currentUserId } // Only mark others' messages as delivered
+                    },
+                    { 
+                        status: 'delivered',
+                        $set: { deliveredAt: new Date() }
+                    }
+                );
+
+                if (result.modifiedCount > 0) {
+                    // Get all updated messages
+                    const updatedMessages = await MessageModel.find({
+                        status: 'delivered',
+                        deleted: { $ne: true },
+                        deliveredAt: { $exists: true }
+                    }).populate('conversationId');
+
+                    // Group messages by sender
+                    const messagesBySender = {};
+                    updatedMessages.forEach(message => {
+                        const senderId = message.msgByUserId.toString();
+                        if (!messagesBySender[senderId]) {
+                            messagesBySender[senderId] = [];
+                        }
+                        messagesBySender[senderId].push(message);
+                    });
+
+                    // Notify each sender about their delivered messages
+                    for (const [senderId, messages] of Object.entries(messagesBySender)) {
+                        messages.forEach(message => {
+                            socket.to(senderId).emit('message_status_update', {
+                                messageId: message._id,
+                                status: 'delivered',
+                                deliveredAt: message.deliveredAt
+                            });
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error('Error marking messages as delivered:', error);
+            }
+        };
+
+        // Mark messages as delivered when user comes online
+        await markMessagesAsDelivered();
+        
         // Notify all clients about the new online user
         io.emit('user_status_change', { userId: currentUserId, status: 'online' });
         io.emit('onlineUser', Array.from(onlineUsers));
@@ -178,119 +231,176 @@ io.on("connection", async (socket) => {
         socket.on("new message", async (data) => {
             try {
                 if (!isValidObjectId(data.sender) || !isValidObjectId(data.receiver)) {
-                    console.error('Invalid sender or receiver ID:', data);
                     socket.emit('error', 'Invalid sender or receiver ID');
                     return;
                 }
 
-                // Get both users to check blocking status
-                const [sender, receiver] = await Promise.all([
-                    UserModel.findById(data.sender).populate('blockedUsers'),
-                    UserModel.findById(data.receiver).populate('blockedUsers')
-                ]);
-
-                // Check if receiver has blocked sender
-                const isBlockedByReceiver = receiver.blockedUsers.some(
-                    blockedUser => blockedUser._id.toString() === data.sender
-                );
-
-                let conversation = await ConvoModel.findOne({
-                    "$or": [
-                        { sender: data.sender, receiver: data.receiver },
-                        { sender: data.receiver, receiver: data.sender },
-                    ]
-                });
-
-                let isNewConversation = false;
-                if (!conversation) {
-                    isNewConversation = true;
-                    conversation = await new ConvoModel({
-                        sender: data.sender,
-                        receiver: data.receiver,
-                        messages: [],
-                    }).save();
-                }
-
-                // Create and save the new message
-                const message = await new MessageModel({
+                // Create message with initial status
+                const initialStatus = onlineUsers.has(data.receiver) ? 'delivered' : 'sent';
+                const now = new Date();
+                const message = new MessageModel({
                     text: data.text,
                     imageUrl: data.imageUrl,
                     videoUrl: data.videoUrl,
                     msgByUserId: data.msgByUserId,
-                    conversationId: conversation._id,
-                    seen: false
-                }).save();
+                    status: initialStatus,
+                    sentAt: now,
+                    deliveredAt: initialStatus === 'delivered' ? now : null
+                });
 
-                // Update conversation
+                // Send temporary message to sender immediately for instant feedback
+                const tempMessageData = {
+                    messages: [{
+                        ...message.toObject(),
+                        _id: 'temp_' + Date.now(),
+                        status: initialStatus
+                    }],
+                    conversationId: data.conversationId || 'temp',
+                    isTemp: true
+                };
+                socket.emit('new_message', tempMessageData);
+
+                // Find or create conversation and save message in parallel
+                const conversation = await ConvoModel.findOneAndUpdate(
+                    {
+                        "$or": [
+                            { sender: data.sender, receiver: data.receiver },
+                            { sender: data.receiver, receiver: data.sender },
+                        ]
+                    },
+                    {
+                        $setOnInsert: {
+                            sender: data.sender,
+                            receiver: data.receiver,
+                            messages: []
+                        }
+                    },
+                    { upsert: true, new: true }
+                );
+
+                // Set conversation ID and save message
+                message.conversationId = conversation._id;
+                await message.save();
+
+                // Update conversation in background
                 conversation.messages.push(message._id);
                 conversation.lastMsg = message._id;
-                conversation.lastMessageAt = new Date();
-                await conversation.save();
+                conversation.lastMessageAt = now;
+                conversation.save().catch(error => 
+                    console.error('Error updating conversation:', error)
+                );
 
-                // Get updated conversation
-                const updatedConversation = await ConvoModel.findById(conversation._id)
-                    .populate({
-                        path: 'messages',
-                        options: { sort: { 'createdAt': 1 } }
-                    })
-                    .populate('lastMsg')
-                    .populate('sender')
-                    .populate('receiver')
-                    .exec();
-
-                // Always send message back to sender
-                socket.emit('message', {
-                    messages: updatedConversation.messages,
+                // Prepare final message data
+                const finalMessageData = {
+                    messages: [message],
                     conversationId: conversation._id,
-                    participants: {
-                        sender: data.sender,
-                        receiver: data.receiver
-                    }
+                    replaceTemp: tempMessageData.messages[0]._id
+                };
+
+                // Send to sender and receiver
+                socket.emit('new_message', finalMessageData);
+                socket.to(data.receiver).emit('new_message', {
+                    messages: [message],
+                    conversationId: conversation._id
                 });
 
-                // Only send to receiver if they haven't blocked the sender
-                if (!isBlockedByReceiver) {
-                    const isReceiverActive = activeConversations.get(data.receiver) === conversation._id.toString();
-                    if (isReceiverActive) {
-                        socket.to(data.receiver).emit('message', {
-                            messages: updatedConversation.messages,
-                            conversationId: conversation._id,
-                            participants: {
-                                sender: data.sender,
-                                receiver: data.receiver
-                            }
-                        });
-                    }
+                // If receiver is online, mark as delivered
+                if (onlineUsers.has(data.receiver)) {
+                    message.status = 'delivered';
+                    message.deliveredAt = now;
+                    message.save().catch(error => 
+                        console.error('Error updating message status:', error)
+                    );
+                    
+                    socket.emit('message_status_update', {
+                        messageId: message._id,
+                        status: 'delivered',
+                        deliveredAt: now
+                    });
                 }
 
-                // Update conversations for both users
-                const [conversationSender, conversationReceiver] = await Promise.all([
+                // Update conversation lists in background
+                Promise.all([
                     getConversation(data.sender),
                     getConversation(data.receiver)
-                ]);
+                ]).then(([conversationSender, conversationReceiver]) => {
+                    socket.emit('conversations', {
+                        conversations: conversationSender,
+                        currentConversationId: activeConversations.get(data.sender)
+                    });
 
-                socket.emit('conversations', {
-                    conversations: conversationSender,
-                    currentConversationId: activeConversations.get(data.sender)
-                });
-
-                // Only update receiver's conversation list if they haven't blocked the sender
-                if (!isBlockedByReceiver) {
                     socket.to(data.receiver).emit('conversations', {
                         conversations: conversationReceiver,
                         currentConversationId: activeConversations.get(data.receiver)
                     });
-                }
+                }).catch(error => 
+                    console.error('Error updating conversation lists:', error)
+                );
+
             } catch (error) {
                 console.error('Error handling new message event:', error);
                 socket.emit('error', 'Internal server error');
             }
         });
 
-        // Handle conversation leave
-        socket.on('leave-conversation', () => {
-            if (currentUserId) {
-                activeConversations.delete(currentUserId);
+        // Handle message seen event
+        socket.on('message_seen', async ({ messageId, conversationId }) => {
+            try {
+                if (!messageId || !conversationId) {
+                    console.error('Missing messageId or conversationId:', { messageId, conversationId });
+                    return;
+                }
+
+                // First find the message to verify it exists and get its data
+                const message = await MessageModel.findById(messageId);
+                if (!message) {
+                    console.error('Message not found:', messageId);
+                    return;
+                }
+
+                // Only update if message isn't already seen
+                if (message.status !== 'seen') {
+                    const seenAt = new Date();
+                    // Update the message status while preserving other fields
+                    const updatedMessage = await MessageModel.findByIdAndUpdate(
+                        messageId,
+                        { 
+                            status: 'seen',
+                            seenAt: seenAt,
+                            seen: true
+                        },
+                        { new: true }
+                    );
+
+                    if (!updatedMessage) {
+                        console.error('Failed to update message status');
+                        return;
+                    }
+
+                    // Notify sender about seen status
+                    socket.to(message.msgByUserId.toString()).emit('message_status_update', {
+                        messageId: message._id,
+                        status: 'seen',
+                        seenAt: seenAt
+                    });
+
+                    // Update all unseen messages in the conversation from the same sender
+                    await MessageModel.updateMany(
+                        {
+                            conversationId: message.conversationId,
+                            status: { $ne: 'seen' },
+                            msgByUserId: message.msgByUserId,
+                            _id: { $ne: message._id }
+                        },
+                        { 
+                            status: 'seen',
+                            seenAt: seenAt,
+                            seen: true
+                        }
+                    );
+                }
+            } catch (error) {
+                console.error('Error handling message seen event:', error);
             }
         });
 
@@ -410,6 +520,7 @@ io.on("connection", async (socket) => {
             if (currentUserId) {
                 onlineUsers.delete(currentUserId);
                 // Notify all clients about the user going offline
+                // Note: We don't change message statuses on disconnect
                 io.emit('user_status_change', { userId: currentUserId, status: 'offline' });
                 io.emit('onlineUser', Array.from(onlineUsers));
             }
