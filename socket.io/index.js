@@ -652,6 +652,67 @@ io.on("connection", async (socket) => {
             }
         });
 
+        // Handle message editing
+        socket.on('edit_message', async ({ messageId, newText, conversationId }) => {
+            try {
+                if (!isValidObjectId(messageId) || !isValidObjectId(conversationId)) {
+                    socket.emit('error', 'Invalid message or conversation ID');
+                    return;
+                }
+
+                // Find and verify the message
+                const message = await MessageModel.findById(messageId);
+                if (!message) {
+                    socket.emit('error', 'Message not found');
+                    return;
+                }
+                
+                if (message.msgByUserId.toString() !== currentUserId) {
+                    socket.emit('error', 'Unauthorized to edit this message');
+                    return;
+                }
+
+                // Check if message is within 15 minutes
+                const messageTime = message.sentAt || message.createdAt;
+                const timeDifference = (new Date() - new Date(messageTime)) / (1000 * 60); // Convert to minutes
+                
+                if (timeDifference > 15) {
+                    socket.emit('error', 'Messages can only be edited within 15 minutes of sending');
+                    return;
+                }
+
+                // Update message text and add edited flag
+                await MessageModel.findByIdAndUpdate(messageId, { 
+                    text: newText,
+                    edited: true,
+                    editedAt: new Date()
+                });
+
+                // Get the updated message
+                const updatedMessage = await MessageModel.findById(messageId);
+
+                // Get both users' IDs from the conversation
+                const conversation = await ConvoModel.findById(conversationId);
+                const otherUserId = conversation.sender.toString() === currentUserId 
+                    ? conversation.receiver.toString() 
+                    : conversation.sender.toString();
+
+                // Emit the updated message to both users
+                const messageUpdate = {
+                    messageId,
+                    updatedMessage,
+                    conversationId
+                };
+
+                socket.emit('message_edited', messageUpdate);
+                socket.to(otherUserId).emit('message_edited', messageUpdate);
+
+            } catch (error) {
+                console.error('Error editing message:', error);
+                socket.emit('error', 'Failed to edit message');
+            }
+        });
+
     } catch (error) {
         console.error('Error during socket connection:', error);
         socket.emit('error', 'Connection error');
