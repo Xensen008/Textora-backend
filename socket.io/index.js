@@ -484,6 +484,15 @@ io.on("connection", async (socket) => {
                     return;
                 }
 
+                // Check if message is within 15 minutes
+                const messageTime = message.sentAt || message.createdAt;
+                const timeDifference = (new Date() - new Date(messageTime)) / (1000 * 60); // Convert to minutes
+                
+                if (timeDifference > 15) {
+                    socket.emit('error', 'Messages can only be deleted within 15 minutes of sending');
+                    return;
+                }
+
                 // Update message to mark as deleted
                 await MessageModel.findByIdAndUpdate(messageId, { deleted: true });
 
