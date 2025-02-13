@@ -29,9 +29,157 @@ const io = new Server(server, {
     cookie: false
 });
 
-// Track active conversations
+// Track active conversations and user sessions
 const activeConversations = new Map(); // userId -> conversationId
 const onlineUsers = new Set();
+const userSessions = new Map(); // userId -> Set of socket IDs
+const loadingStates = new Map(); // userId_targetUserId -> boolean
+
+// Add a helper function to handle message page loading
+const handleMessagePageLoad = async (socket, currentUserId, targetUserId) => {
+    try {
+        const loadingKey = `${currentUserId}_${targetUserId}`;
+        
+        if (loadingStates.get(loadingKey)) {
+            return;
+        }
+        
+        loadingStates.set(loadingKey, true);
+
+        // Load user and conversation data in parallel with proper message population
+        const [currentUser, userDetails, conversation] = await Promise.all([
+            UserModel.findById(currentUserId).populate('blockedUsers').select('blockedUsers'),
+            UserModel.findById(targetUserId).select("name email profile_pic"),
+            ConvoModel.findOne({
+                "$or": [
+                    { sender: currentUserId, receiver: targetUserId },
+                    { sender: targetUserId, receiver: currentUserId },
+                ]
+            }).populate({
+                path: 'messages',
+                match: { deleted: { $ne: true } },
+                select: 'text imageUrl videoUrl msgByUserId status seen seenAt deliveredAt sentAt createdAt'
+            }).select('messages lastMsg')
+        ]);
+
+        if (!userDetails) {
+            socket.emit('error', 'User not found');
+            loadingStates.delete(loadingKey);
+            return;
+        }
+
+        // Check if user is blocked
+        const isBlocked = currentUser.blockedUsers.some(
+            blockedUser => blockedUser._id.toString() === targetUserId
+        );
+
+        // Send user data immediately
+        socket.emit('message-user', {
+            user: {
+                _id: userDetails._id,
+                name: userDetails.name,
+                email: userDetails.email,
+                profile_pic: userDetails.profile_pic,
+                isBlocked
+            },
+            conversationId: conversation?._id || null
+        });
+
+        socket.emit('user_status_change', { 
+            userId: targetUserId, 
+            status: onlineUsers.has(targetUserId) ? 'online' : 'offline' 
+        });
+
+        if (conversation) {
+            const conversationId = conversation._id.toString();
+            socket.join(conversationId);
+            activeConversations.set(currentUserId, conversationId);
+
+            // Process messages to ensure correct status
+            const processedMessages = conversation.messages.map(msg => {
+                const msgObj = msg.toObject();
+                // If message is from the other user and was seen
+                if (msg.msgByUserId.toString() === targetUserId && msg.seen) {
+                    msgObj.status = 'seen';
+                    msgObj.seenAt = msg.seenAt || msg.updatedAt;
+                }
+                // If message is from current user, ensure proper status
+                else if (msg.msgByUserId.toString() === currentUserId) {
+                    if (msg.seen) {
+                        msgObj.status = 'seen';
+                        msgObj.seenAt = msg.seenAt || msg.updatedAt;
+                    } else if (msg.status === 'delivered' || onlineUsers.has(targetUserId)) {
+                        msgObj.status = 'delivered';
+                        msgObj.deliveredAt = msg.deliveredAt || msg.updatedAt;
+                    } else {
+                        msgObj.status = 'sent';
+                    }
+                }
+                return msgObj;
+            });
+
+            // Mark unseen messages as seen
+            const unseenMessages = processedMessages.filter(msg => 
+                msg.msgByUserId.toString() === targetUserId && !msg.seen
+            );
+
+            if (unseenMessages.length > 0) {
+                await MessageModel.updateMany(
+                    { _id: { $in: unseenMessages.map(msg => msg._id) } },
+                    { 
+                        seen: true,
+                        status: 'seen',
+                        seenAt: new Date()
+                    }
+                );
+
+                socket.to(targetUserId).emit('messages_seen_batch', {
+                    messageIds: unseenMessages.map(msg => msg._id),
+                    seenAt: new Date()
+                });
+            }
+
+            // Send messages with correct status
+            socket.emit('message', {
+                messages: isBlocked ? [] : processedMessages,
+                conversationId: conversation._id,
+                participants: {
+                    sender: currentUserId,
+                    receiver: targetUserId
+                },
+                isBlocked
+            });
+
+            // Update conversation lists
+            Promise.all([
+                getConversation(currentUserId),
+                getConversation(targetUserId)
+            ]).then(([conversationSender, conversationReceiver]) => {
+                socket.emit('conversations', {
+                    conversations: conversationSender,
+                    currentConversationId: conversation._id
+                });
+                
+                socket.to(targetUserId).emit('conversations', {
+                    conversations: conversationReceiver,
+                    currentConversationId: conversation._id
+                });
+            }).catch(console.error);
+        } else {
+            socket.emit('message', {
+                messages: [],
+                conversationId: null,
+                participants: { sender: currentUserId, receiver: targetUserId }
+            });
+        }
+
+        loadingStates.delete(loadingKey);
+    } catch (error) {
+        console.error('Error handling message-page event:', error);
+        socket.emit('error', 'Failed to load messages');
+        loadingStates.delete(`${currentUserId}_${targetUserId}`);
+    }
+};
 
 // Handle socket connection
 io.on("connection", async (socket) => {
@@ -44,70 +192,82 @@ io.on("connection", async (socket) => {
 
         if (!user || !isValidObjectId(user._id)) {
             console.error('Invalid user data:', user);
+            socket.emit('error', 'Invalid user data');
             socket.disconnect();
             return;
         }
 
         currentUserId = user._id.toString();
-        socket.join(currentUserId);
-        onlineUsers.add(currentUserId);
         
-        // When user comes online, mark pending messages as delivered
-        const markMessagesAsDelivered = async () => {
-            try {
-                // Update all undelivered messages in one query
-                const result = await MessageModel.updateMany(
-                    {
-                        status: 'sent',
-                        deleted: { $ne: true },
-                        msgByUserId: { $ne: currentUserId } // Only mark others' messages as delivered
-                    },
-                    { 
-                        status: 'delivered',
-                        $set: { deliveredAt: new Date() }
-                    }
-                );
+        // Track multiple sessions per user
+        if (!userSessions.has(currentUserId)) {
+            userSessions.set(currentUserId, new Set());
+        }
+        userSessions.get(currentUserId).add(socket.id);
+        
+        // Mark user as online
+        if (!onlineUsers.has(currentUserId)) {
+            onlineUsers.add(currentUserId);
+            io.emit('user_status_change', { userId: currentUserId, status: 'online' });
+            io.emit('onlineUser', Array.from(onlineUsers));
+            
+            // Mark messages as delivered
+            await markMessagesAsDelivered(currentUserId);
+        }
 
-                if (result.modifiedCount > 0) {
-                    // Get all updated messages
-                    const updatedMessages = await MessageModel.find({
-                        status: 'delivered',
-                        deleted: { $ne: true },
-                        deliveredAt: { $exists: true }
-                    }).populate('conversationId');
+        socket.join(currentUserId);
 
-                    // Group messages by sender
-                    const messagesBySender = {};
-                    updatedMessages.forEach(message => {
-                        const senderId = message.msgByUserId.toString();
-                        if (!messagesBySender[senderId]) {
-                            messagesBySender[senderId] = [];
-                        }
-                        messagesBySender[senderId].push(message);
-                    });
+        // Handle message page request
+        socket.on("message-page", async (targetUserId) => {
+            if (!isValidObjectId(targetUserId)) {
+                socket.emit('error', 'Invalid userId');
+                return;
+            }
 
-                    // Notify each sender about their delivered messages
-                    for (const [senderId, messages] of Object.entries(messagesBySender)) {
-                        messages.forEach(message => {
-                            socket.to(senderId).emit('message_status_update', {
-                                messageId: message._id,
-                                status: 'delivered',
-                                deliveredAt: message.deliveredAt
-                            });
-                        });
+            // Leave previous conversation if any
+            if (activeConversations.has(currentUserId)) {
+                const prevConversationId = activeConversations.get(currentUserId);
+                if (prevConversationId) {
+                    socket.leave(prevConversationId);
+                    activeConversations.delete(currentUserId);
+                }
+            }
+
+            await handleMessagePageLoad(socket, currentUserId, targetUserId);
+        });
+
+        // Handle disconnection with cleanup
+        socket.on('disconnect', () => {
+            if (currentUserId) {
+                // Clean up loading states
+                for (const [key] of loadingStates) {
+                    if (key.startsWith(currentUserId)) {
+                        loadingStates.delete(key);
                     }
                 }
-            } catch (error) {
-                console.error('Error marking messages as delivered:', error);
-            }
-        };
 
-        // Mark messages as delivered when user comes online
-        await markMessagesAsDelivered();
-        
-        // Notify all clients about the new online user
-        io.emit('user_status_change', { userId: currentUserId, status: 'online' });
-        io.emit('onlineUser', Array.from(onlineUsers));
+                // Remove this socket session
+                const userSocketSessions = userSessions.get(currentUserId);
+                if (userSocketSessions) {
+                    userSocketSessions.delete(socket.id);
+                    
+                    // Only mark user as offline if they have no active sessions
+                    if (userSocketSessions.size === 0) {
+                        userSessions.delete(currentUserId);
+                        onlineUsers.delete(currentUserId);
+                        io.emit('user_status_change', { userId: currentUserId, status: 'offline' });
+                        io.emit('onlineUser', Array.from(onlineUsers));
+                    }
+                }
+                
+                // Leave conversation room if any
+                if (activeConversations.has(currentUserId)) {
+                    socket.leave(activeConversations.get(currentUserId));
+                    activeConversations.delete(currentUserId);
+                }
+            }
+            console.log('User disconnected:', socket.id);
+        });
 
         // Handle get-online-users request
         socket.on('get-online-users', () => {
@@ -125,106 +285,6 @@ io.on("connection", async (socket) => {
             } catch (error) {
                 console.error('Error fetching initial conversations:', error);
                 socket.emit('error', 'Failed to fetch conversations');
-            }
-        });
-
-        socket.on('message-page', async (targetUserId) => {
-            try {
-                if (!isValidObjectId(targetUserId)) {
-                    console.error('Invalid userId:', targetUserId);
-                    socket.emit('error', 'Invalid userId');
-                    return;
-                }
-
-                const currentUser = await UserModel.findById(currentUserId).populate('blockedUsers');
-                const userDetails = await UserModel.findById(targetUserId).select("-password");
-                
-                // Check if user is blocked
-                const isBlocked = currentUser.blockedUsers.some(
-                    blockedUser => blockedUser._id.toString() === targetUserId
-                );
-
-                const payload = {
-                    _id: userDetails?._id,
-                    name: userDetails?.name,
-                    email: userDetails?.email,
-                    profile_pic: userDetails?.profile_pic,
-                    isBlocked
-                };
-
-                // Send current online status immediately when opening chat
-                socket.emit('user_status_change', { 
-                    userId: targetUserId, 
-                    status: onlineUsers.has(targetUserId) ? 'online' : 'offline' 
-                });
-
-                const conversation = await ConvoModel.findOne({
-                    "$or": [
-                        { sender: currentUserId, receiver: targetUserId },
-                        { sender: targetUserId, receiver: currentUserId },
-                    ]
-                }).populate('messages').sort({ updatedAt: -1 });
-
-                if (conversation) {
-                    // Store active conversation for this user
-                    activeConversations.set(currentUserId, conversation._id.toString());
-
-                    // Mark messages as seen
-                    await MessageModel.updateMany({
-                        conversationId: conversation._id,
-                        msgByUserId: targetUserId,
-                        seen: false
-                    }, { seen: true });
-
-                    // Get updated conversation
-                    const updatedConversation = await ConvoModel.findById(conversation._id)
-                        .populate('messages')
-                        .populate('lastMsg')
-                        .sort({ updatedAt: -1 });
-
-                    socket.emit('message-user', {
-                        user: payload,
-                        conversationId: updatedConversation._id
-                    });
-
-                    socket.emit('message', {
-                        messages: isBlocked ? [] : updatedConversation.messages,
-                        conversationId: updatedConversation._id,
-                        participants: {
-                            sender: currentUserId,
-                            receiver: targetUserId
-                        },
-                        isBlocked
-                    });
-
-                    // Update sidebar for both users
-                    const [conversationSender, conversationReceiver] = await Promise.all([
-                        getConversation(currentUserId),
-                        getConversation(targetUserId)
-                    ]);
-
-                    socket.emit('conversations', {
-                        conversations: conversationSender,
-                        currentConversationId: updatedConversation._id
-                    });
-                    
-                    socket.to(targetUserId).emit('conversations', {
-                        conversations: conversationReceiver,
-                        currentConversationId: updatedConversation._id
-                    });
-
-                    socket.to(targetUserId).emit('messages-seen', currentUserId);
-                } else {
-                    socket.emit('message-user', { user: payload, conversationId: null });
-                    socket.emit('message', {
-                        messages: [],
-                        conversationId: null,
-                        participants: { sender: currentUserId, receiver: targetUserId }
-                    });
-                }
-            } catch (error) {
-                console.error('Error handling message-page event:', error);
-                socket.emit('error', 'Internal server error');
             }
         });
 
@@ -515,18 +575,6 @@ io.on("connection", async (socket) => {
             }
         });
 
-        // Handle disconnection
-        socket.on('disconnect', () => {
-            if (currentUserId) {
-                onlineUsers.delete(currentUserId);
-                // Notify all clients about the user going offline
-                // Note: We don't change message statuses on disconnect
-                io.emit('user_status_change', { userId: currentUserId, status: 'offline' });
-                io.emit('onlineUser', Array.from(onlineUsers));
-            }
-            console.log('User disconnected:', socket.id);
-        });
-
         // Handle block user
         socket.on('block_user', async ({ userIdToBlock }) => {
             try {
@@ -597,9 +645,59 @@ io.on("connection", async (socket) => {
 
     } catch (error) {
         console.error('Error during socket connection:', error);
+        socket.emit('error', 'Connection error');
         socket.disconnect();
     }
 });
+
+// Helper function to mark messages as delivered
+async function markMessagesAsDelivered(userId) {
+    try {
+        const result = await MessageModel.updateMany(
+            {
+                status: 'sent',
+                deleted: { $ne: true },
+                msgByUserId: { $ne: userId },
+                seen: { $ne: true }  // Don't update already seen messages
+            },
+            { 
+                status: 'delivered',
+                deliveredAt: new Date()
+            }
+        );
+
+        if (result.modifiedCount > 0) {
+            const updatedMessages = await MessageModel.find({
+                status: 'delivered',
+                deleted: { $ne: true },
+                deliveredAt: { $exists: true },
+                msgByUserId: { $ne: userId }
+            }).populate('conversationId');
+
+            const messagesBySender = {};
+            updatedMessages.forEach(message => {
+                const senderId = message.msgByUserId.toString();
+                if (!messagesBySender[senderId]) {
+                    messagesBySender[senderId] = [];
+                }
+                messagesBySender[senderId].push(message);
+            });
+
+            for (const [senderId, messages] of Object.entries(messagesBySender)) {
+                messages.forEach(message => {
+                    io.to(senderId).emit('message_status_update', {
+                        messageId: message._id,
+                        status: message.seen ? 'seen' : 'delivered',
+                        deliveredAt: message.deliveredAt,
+                        seenAt: message.seenAt
+                    });
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Error marking messages as delivered:', error);
+    }
+}
 
 // Export the Express app and HTTP server
 module.exports = { app, server };
